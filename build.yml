@@ -1,0 +1,85 @@
+name: Build Toaster VPN APK
+
+# Запуск вручную: вкладка Actions -> Build Toaster VPN APK -> Run workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Android NDK
+        run: |
+          NDK=$(sdkmanager --list 2>/dev/null | grep -o 'ndk;[0-9][0-9.]*' | sort -uV | tail -1)
+          echo "Ставлю $NDK"
+          sdkmanager "$NDK"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK#ndk;}" >> "$GITHUB_ENV"
+
+      - name: Скачать исходники открытого клиента sing-box для Android
+        run: |
+          git clone --recurse-submodules https://github.com/SagerNet/sing-box-for-android.git upstream
+
+      - name: Переименовать в Toaster VPN
+        working-directory: upstream
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          root = pathlib.Path(".")
+
+          # Название приложения
+          n = 0
+          for f in root.glob("app/src/main/res/values*/strings.xml"):
+              t = f.read_text(encoding="utf-8")
+              t2 = re.sub(r'(<string name="app_name"[^>]*>)[^<]*(</string>)',
+                          r'\1Toaster VPN\2', t)
+              if t2 != t:
+                  f.write_text(t2, encoding="utf-8")
+                  n += 1
+          print("Название заменено в файлах:", n)
+
+          # Идентификатор приложения (чтобы не конфликтовать с оригиналом)
+          m = 0
+          for f in root.glob("app/build.gradle*"):
+              t = f.read_text(encoding="utf-8")
+              t2 = re.sub(r'applicationId(\s*=)?\s*"[^"]+"',
+                          'applicationId = "uz.toaster.vpn"', t)
+              if t2 != t:
+                  f.write_text(t2, encoding="utf-8")
+                  m += 1
+          print("applicationId заменён в файлах:", m)
+          if n == 0 or m == 0:
+              print("ВНИМАНИЕ: структура проекта отличается, проверь переименование вручную")
+          PY
+
+      - name: Собрать ядро (libbox)
+        working-directory: upstream
+        run: |
+          make lib_install
+          make lib || { echo "--- Makefile проекта ---"; cat Makefile; exit 1; }
+
+      - name: Собрать APK
+        working-directory: upstream
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleOtherDebug || ./gradlew --no-daemon assembleDebug
+
+      - name: Сохранить APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Toaster-VPN-apk
+          path: upstream/app/build/outputs/apk/**/*.apk
